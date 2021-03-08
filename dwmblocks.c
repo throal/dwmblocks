@@ -32,6 +32,7 @@ void getcmds(int time);
 void getsigcmds(unsigned int signal);
 void setupsignals();
 void sighandler(int signum);
+void buttonhandler(int sig, siginfo_t *si, void *ucontext);
 int getstatus(char *str, char *last);
 void statusloop();
 void termhandler();
@@ -58,8 +59,14 @@ static int returnStatus = 0;
 //opens process *cmd and stores output in *output
 void getcmd(const Block *block, char *output)
 {
+	if (block->signal)
+	{
+		output[0] = block->signal;
+		output++;
+	}
 	strcpy(output, block->icon);
-	FILE *cmdf = popen(block->command, "r");
+	char *cmd = block->command;
+	FILE *cmdf = popen(cmd,"r");
 	if (!cmdf)
 		return;
 	int i = strlen(block->icon);
@@ -70,10 +77,10 @@ void getcmd(const Block *block, char *output)
 		pclose(cmdf);
 		return;
 	}
-	if (delim[0] != '\0') {
+	if (delim[0] != '\0' && --i) {
 		//only chop off newline if one is present at the end
 		i = output[i-1] == '\n' ? i-1 : i;
-		strncpy(output+i, delim, delimLen); 
+		strncpy(output+i, delim, delimLen);
 	}
 	else
 		output[i++] = '\0';
@@ -102,6 +109,7 @@ void getsigcmds(unsigned int signal)
 
 void setupsignals()
 {
+	struct sigaction sa;
 #ifndef __OpenBSD__
 	    /* initialize all real time signals with dummy handler */
     for (int i = SIGRTMIN; i <= SIGRTMAX; i++)
@@ -110,9 +118,15 @@ void setupsignals()
 
 	for (unsigned int i = 0; i < LENGTH(blocks); i++) {
 		if (blocks[i].signal > 0)
+		{
 			signal(SIGMINUS+blocks[i].signal, sighandler);
+			sigaddset(&sa.sa_mask, SIGRTMIN+blocks[i].signal);
+		}
 	}
-
+	sa.sa_sigaction = buttonhandler;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGUSR1, &sa, NULL);
+	signal(SIGCHLD, SIG_IGN);
 }
 
 int getstatus(char *str, char *last)
@@ -145,6 +159,34 @@ int setupX()
 	root = RootWindow(dpy, screen);
 	return 1;
 }
+
+void buttonhandler(int sig, siginfo_t *si, void *ucontext)
+{
+	int button = si->si_value.sival_int & 0xff;
+	sig = si->si_value.sival_int >> 8;
+	getsigcmds(sig);
+	writestatus();
+	if (fork() == 0)
+	{
+		static char exportstring[CMDLENGTH + 22] = "export BLOCK_BUTTON=-;";
+		const Block *current;
+		int i;
+		for (i = 0; i < LENGTH(blocks); i++)
+		{
+			current = blocks + i;
+			if (current->signal == sig)
+				break;
+		}
+		char *cmd = strcat(exportstring, blocks[i].command);
+		cmd[20] = '0' + button;
+		char *command[] = { "/bin/sh", "-c", cmd, NULL };
+		setsid();
+		execvp(command[0], command);
+		exit(EXIT_SUCCESS);
+		cmd[22] = '\0';
+	}
+}
+
 #endif
 
 void pstdout()
@@ -211,3 +253,4 @@ int main(int argc, char** argv)
 #endif
 	return 0;
 }
+
